@@ -1,0 +1,37 @@
+# --- Données sensibles ---
+data1.csv
+*.csv
+
+# --- Sorties générées ---
+plots/
+*.png
+*.jpg
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+
+# --- Environnements virtuels ---
+.venv/
+venv/
+env/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- uv ---
+# (uv.lock est volontairement gardé pour la reproductibilité,
+#  décommente la ligne suivante si tu ne veux pas le versionner)
+# uv.lock
+
+# --- Éditeurs / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Divers ---
+*.log
