@@ -6,7 +6,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import (
-    train_test_split,
     GridSearchCV,
     StratifiedKFold,
     learning_curve,
@@ -18,22 +17,11 @@ from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
 from sklearn.metrics import (
     classification_report,
-    confusion_matrix,
     ConfusionMatrixDisplay,
-    accuracy_score,
-    roc_auc_score,
 )
 
-
 # ---------------------------------------------------------------------------
-# 1. Split train/test
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
-# 2. Modèles + grilles d'hyperparamètres
+#  Modèles + grilles d'hyperparamètres
 # ---------------------------------------------------------------------------
 
 def get_models_and_grids(random_state: int = 42) -> Mapping[str, Mapping[str, Any]]:
@@ -213,7 +201,7 @@ def train_and_compare_classifiers(
 
 
 # ---------------------------------------------------------------------------
-# 5. Application aux patients (transform, jamais refit)
+#  Application aux patients (transform, jamais refit)
 # ---------------------------------------------------------------------------
 
 def apply_to_patients(
