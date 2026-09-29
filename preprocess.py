@@ -1,29 +1,19 @@
-"""
-Pipeline de traitement des données du questionnaire (BAI, TSQ, EP, 16-items, ZTPI).
-
-Usage dans un notebook :
-    from pipeline import *
-
-    df_PS, df_PD = load_and_split("C:/TSQ/data/data1.csv")
-    df_SD_PS, df_SD_PD = extract_socio_demo(df, df_PS, df_PD)
-    df_SD_PS = clean_impute_socio_demo(df_SD_PS)
-    df_BAI = process_bai(df_PS)
-    df_TSQ, df_TSQ_PD = process_tsq(df_PS, df_PD)
-    df_EP, df_EP_PD = process_ep(df_PS, df_PD)
-    df_16, df_16_PD, echelle1, echelle2 = process_16items(df_PS, df_PD)
-    df_sub = process_sub(df_PS)
-    df_ZTPI, df_ZTPI_PD = process_ztpi(df_PS, df_PD)
-
-Ou, pour tout faire d'un coup :
-    resultats = run_full_pipeline("C:/TSQ/data/data1.csv")
-    df_BAI = resultats["df_BAI"]
-    ...
-"""
-
 import pandas as pd
 from sklearn.impute import SimpleImputer
 
+DATA_PATH = r"C:\TSQ\data\Projet_final_DESU\data2.csv"
+
 COL_DIAGNOSTIC = "Avez-vous déjà reçu un diagnostic psychiatrique dans le passé ou actuellement ?"
+
+# Lignes (index du CSV brut) exclues de l'analyse :
+#   84  : diagnostic déclaré qui porte à confusion (pas une pathologie)
+#   232 : HPI, ne fait pas partie des diagnostics retenus
+#   338 : âge saisi aberrant (192006)
+#   43, 91, 196, 299 : ont déclaré avoir déjà rempli le questionnaire
+LIGNES_A_EXCLURE = [84, 232, 338, 43, 91, 196, 299]
+
+# Colonnes techniques inutiles à supprimer dès le chargement
+COLS_TECHNIQUES = ["Date de soumission", "Date de lancement", "Date de la dernière action", "Quota exit"]
 
 DONNEES_SOC_DEMO = [
     'ID de la réponse', 'Dernière page', 'Langue de départ', 'Tête de série',
@@ -49,74 +39,85 @@ LABELS_BAI = ["Minimale (0-7)", "Légère (8-15)", "Modérée (16-25)", "Sévèr
 
 COL_TSQ_A_SUPPRIMER = "Nous vous remercions pour votre engagement et vous invitons à passer à la suite de ce questionnaire.\xa0"
 
+# ZTPI : positions (dans le bloc de 56 colonnes) des 2 items exclus -> 54 items restants (car dans version francaise 54 items)
+ZTPI_POS_A_EXCLURE = (15, 36)
 
-# ---------------------------------------------------------------------------
-# 1. Chargement et split PS / PD
+# Nombre de colonnes attendu par échelle (vérification de sécurité)
+N_ATTENDU = {"BAI": 21, "TSQ": 40, "EP": 7, "16items": 32, "sub": 5, "ZTPI": 54}
 
-def load_and_split(filepath, sep=",", encoding="utf-8"):
+def _extract_num(df, cols):
+    """Extrait le premier nombre de chaque réponse (ex: '3 - Souvent' -> 3.0)."""
+    return df[cols].apply(lambda col: col.astype(str).str.extract(r"(\d+)")[0].astype(float))
+
+
+def _check_n(cols, nom):
+    if len(cols) != N_ATTENDU[nom]:
+        raise ValueError(
+            f"{nom} : {len(cols)} colonnes trouvées au lieu de {N_ATTENDU[nom]}. "
+            "Les positions de colonnes ont probablement changé dans le nouveau CSV."
+        )
+
+
+def load_and_split(filepath=DATA_PATH, sep=",", encoding="utf-8", lignes_a_exclure=LIGNES_A_EXCLURE):
     """
-    Charge le CSV, on supprime les lignes sans date de soumission,
-    et on sépare les participants sans diagnostic (PS) et avec diagnostic (PD).
+    Charge le CSV, exclut les participants écartés, supprime les lignes sans date de
+    soumission et les colonnes techniques, puis sépare les participants sans
+    diagnostic (PS) et avec diagnostic (PD).
 
     Retourne : df, df_PS, df_PD
     """
     df = pd.read_csv(filepath, sep=sep, encoding=encoding)
-    df = df.drop(df.index[[84, 232]])
+    df = df.drop(df.index[lignes_a_exclure])
     df = df.dropna(subset=["Date de soumission"])
-    df = df.drop(columns=["Date de soumission"])
-    
+    df = df.drop(columns=COLS_TECHNIQUES, errors="ignore")
 
     df_PS = df[df[COL_DIAGNOSTIC] == "Non"].copy()
     df_PD = df[df[COL_DIAGNOSTIC] == "Oui"].copy()
 
+    print(f"Shape : {df.shape} | PS : {len(df_PS)} | PD : {len(df_PD)} "
+          f"({len(df_PD) / len(df) * 100:.1f}% avec diagnostic)")
+
     return df, df_PS, df_PD
 
 
-# ---------------------------------------------------------------------------
-# 2. Données sociodémographiques
-
 def extract_socio_demo(df, df_PS, df_PD):
-    """Extrait les colonnes sociodémographiques pour df, df_PS et df_PD."""
+    
     df_SD = df[DONNEES_SOC_DEMO].copy()
     df_SD_PD = df_PD[DONNEES_SOC_DEMO].copy()
     df_SD_PS = df_PS[DONNEES_SOC_DEMO].copy()
     return df_SD, df_SD_PS, df_SD_PD
 
 
-def clean_impute_socio_demo(df_SD, seuil=0.3):
+def clean_impute_socio_demo(df_SD, seuil=0.3, supprimer_colonnes_vides=False):
     
     df_SD = df_SD.copy()
 
     lignes_vides = df_SD.isnull().all(axis=1).sum()
     print(f"Nombre de lignes complètement vides : {lignes_vides}")
 
-    seuil = len(df_SD) * seuil
-    df_SD = df_SD.dropna(axis=1, thresh=seuil)
+    if supprimer_colonnes_vides:
+        df_SD = df_SD.dropna(axis=1, thresh=len(df_SD) * seuil)
 
     cols_num = df_SD.select_dtypes(include="number").columns
     cols_cat = df_SD.select_dtypes(exclude="number").columns
 
-    imputer_num = SimpleImputer(strategy="mean")
-    df_SD[cols_num] = imputer_num.fit_transform(df_SD[cols_num])
+    if len(cols_num) > 0:
+        imputer_num = SimpleImputer(strategy="mean")
+        df_SD[cols_num] = imputer_num.fit_transform(df_SD[cols_num])
 
     imputer_cat = SimpleImputer(strategy="constant", fill_value="Inconnu", keep_empty_features=True)
-    df_cat_imputed = pd.DataFrame(
+    df_SD[cols_cat] = pd.DataFrame(
         imputer_cat.fit_transform(df_SD[cols_cat]),
         columns=cols_cat,
         index=df_SD.index
     )
-    df_SD[cols_cat] = df_cat_imputed
 
     return df_SD
 
 
-# ---------------------------------------------------------------------------
-# 3. BAI (échelle d'anxiété)
-
-
 def process_bai(df_PS, col_start=25, col_end=46):
-    
     cols_bai = df_PS.columns[col_start:col_end]
+    _check_n(cols_bai, "BAI")
     df_BAI = df_PS[cols_bai].copy()
 
     df_BAI["score_total"] = df_BAI.sum(axis=1)
@@ -131,13 +132,18 @@ def process_bai(df_PS, col_start=25, col_end=46):
     return df_BAI
 
 
+def process_bai_pd(df_PD, col_start=25, col_end=46):
+
+    cols_bai = df_PD.columns[col_start:col_end]
+    df_BAI_PD = df_PD[cols_bai].copy()
+    df_BAI_PD["score_total"] = df_BAI_PD.sum(axis=1)
+    return df_BAI_PD
+
+
 def repartition_bai(df_BAI):
-    
     return df_BAI["categorie_anxiete"].value_counts().reindex(LABELS_BAI)
 
 
-# ---------------------------------------------------------------------------
-# 4. TSQ
 def process_tsq(df_PS, df_PD, col_start=46, col_end=87):
     cols_TSQ = df_PS.columns[col_start:col_end]
     cols_TSQ_PD = df_PD.columns[col_start:col_end]
@@ -145,21 +151,15 @@ def process_tsq(df_PS, df_PD, col_start=46, col_end=87):
     df_TSQ = df_PS[cols_TSQ].copy()
     df_TSQ_PD = df_PD[cols_TSQ_PD].copy()
 
-    if COL_TSQ_A_SUPPRIMER in df_TSQ.columns:
-        df_TSQ = df_TSQ.drop(columns=[COL_TSQ_A_SUPPRIMER])
-    if COL_TSQ_A_SUPPRIMER in df_TSQ_PD.columns:
-        df_TSQ_PD = df_TSQ_PD.drop(columns=[COL_TSQ_A_SUPPRIMER])
+    df_TSQ = df_TSQ.drop(columns=[COL_TSQ_A_SUPPRIMER], errors="ignore")
+    df_TSQ_PD = df_TSQ_PD.drop(columns=[COL_TSQ_A_SUPPRIMER], errors="ignore")
+    _check_n(df_TSQ.columns, "TSQ")
 
     cols_items = df_TSQ.columns
     cols_items_pd = df_TSQ_PD.columns
 
-    # Extraction du chiffre + conversion numérique avant de sommer
-    df_TSQ[cols_items] = df_TSQ[cols_items].apply(
-        lambda col: col.astype(str).str.extract(r"(\d+)")[0].astype(float)
-    )
-    df_TSQ_PD[cols_items_pd] = df_TSQ_PD[cols_items_pd].apply(
-        lambda col: col.astype(str).str.extract(r"(\d+)")[0].astype(float)
-    )
+    df_TSQ[cols_items] = _extract_num(df_TSQ, cols_items)
+    df_TSQ_PD[cols_items_pd] = _extract_num(df_TSQ_PD, cols_items_pd)
 
     df_TSQ["score_total"] = df_TSQ[cols_items].sum(axis=1)
     df_TSQ_PD["score_total"] = df_TSQ_PD[cols_items_pd].sum(axis=1)
@@ -167,37 +167,30 @@ def process_tsq(df_PS, df_PD, col_start=46, col_end=87):
     return df_TSQ, df_TSQ_PD
 
 
-# ---------------------------------------------------------------------------
-# 5. EP (7 items cotés 1 à 5)
-
 def process_ep(df_PS, df_PD, col_start=87, col_end=94):
-    cols_EP_PD = df_PD.columns[col_start:col_end]
     cols_EP = df_PS.columns[col_start:col_end]
+    cols_EP_PD = df_PD.columns[col_start:col_end]
+    _check_n(cols_EP, "EP")
 
-    df_EP_PD = df_PD[cols_EP_PD].copy()
     df_EP = df_PS[cols_EP].copy()
+    df_EP_PD = df_PD[cols_EP_PD].copy()
 
-    df_EP[cols_EP] = df_EP[cols_EP].apply(pd.to_numeric, errors="coerce")
-    df_EP_PD[cols_EP_PD] = df_EP_PD[cols_EP_PD].apply(pd.to_numeric, errors="coerce")
+   
+    df_EP[cols_EP] = _extract_num(df_EP, cols_EP)
+    df_EP_PD[cols_EP_PD] = _extract_num(df_EP_PD, cols_EP_PD)
 
     df_EP["score_total"] = df_EP[cols_EP].sum(axis=1)
     df_EP_PD["score_total"] = df_EP_PD[cols_EP_PD].sum(axis=1)
 
     return df_EP, df_EP_PD
 
-# ---------------------------------------------------------------------------
-# 6. Échelle 16 items dichotomique (vrai/faux + intensité)
 
 
 def process_16items(df_PS, df_PD, col_start=94, col_end=126):
-    """
-    On extrait les 16 items dichotomiques (échelle1 = vrai/faux, échelle2 = intensité),
-    calcule le nombre de "VRAI" par ligne et le score total sur l'échelle 2
-    (valeurs numériques uniquement, les autres deviennent NaN et sont ignorées).
-
-    """
+  
     cols_16 = df_PS.columns[col_start:col_end]
     cols_16_PD = df_PD.columns[col_start:col_end]
+    _check_n(cols_16, "16items")
 
     df_16 = df_PS[cols_16].copy()
     df_16_PD = df_PD[cols_16_PD].copy()
@@ -209,7 +202,6 @@ def process_16items(df_PS, df_PD, col_start=94, col_end=126):
     df_16_num = df_16[echelle2].apply(pd.to_numeric, errors="coerce")
     df_16["score_total"] = df_16_num.sum(axis=1, skipna=True)
 
-    # Même traitement pour PD si les colonnes vrai/faux existent à la même position
     echelle1_pd = cols_16_PD[0::2]
     echelle2_pd = cols_16_PD[1::2]
     df_16_PD["nb_vrai"] = (df_16_PD[echelle1_pd] == "VRAI").sum(axis=1)
@@ -219,47 +211,39 @@ def process_16items(df_PS, df_PD, col_start=94, col_end=126):
     return df_16, df_16_PD, echelle1, echelle2
 
 
-# ---------------------------------------------------------------------------
-# 7. Sub (questions liées à la consommation de substances)
-
 
 def process_sub(df_PS, col_start=126, col_end=131):
-    """Extrait les colonnes liées aux questions de substance."""
     cols_sub = df_PS.columns[col_start:col_end]
-    df_sub = df_PS[cols_sub].copy()
-    return df_sub
+    _check_n(cols_sub, "sub")
+    return df_PS[cols_sub].copy()
 
 
-# ---------------------------------------------------------------------------
-# 8. ZTPI
-
-
-def process_ztpi(df_PS, df_PD, col_start=131, col_end=187):
-   
-    cols_ZTPI = df_PS.columns[col_start:col_end]
-    cols_ZTPI_PD = df_PD.columns[col_start:col_end]
+def process_ztpi(df_PS, df_PD, col_start=131, col_end=187, pos_a_exclure=ZTPI_POS_A_EXCLURE):
+    cols_ZTPI = [c for i, c in enumerate(df_PS.columns[col_start:col_end]) if i not in pos_a_exclure]
+    cols_ZTPI_PD = [c for i, c in enumerate(df_PD.columns[col_start:col_end]) if i not in pos_a_exclure]
+    _check_n(cols_ZTPI, "ZTPI")
 
     df_ZTPI = df_PS[cols_ZTPI].copy()
     df_ZTPI_PD = df_PD[cols_ZTPI_PD].copy()
 
-    df_ZTPI["score_total"] = df_ZTPI.sum(axis=1)
-    df_ZTPI_PD["score_total"] = df_ZTPI_PD.sum(axis=1)
+    df_ZTPI[cols_ZTPI] = _extract_num(df_ZTPI, cols_ZTPI)
+    df_ZTPI_PD[cols_ZTPI_PD] = _extract_num(df_ZTPI_PD, cols_ZTPI_PD)
+
+    df_ZTPI["score_total"] = df_ZTPI[cols_ZTPI].sum(axis=1)
+    df_ZTPI_PD["score_total"] = df_ZTPI_PD[cols_ZTPI_PD].sum(axis=1)
 
     return df_ZTPI, df_ZTPI_PD
 
 
-# ---------------------------------------------------------------------------
-# 9. Pipeline complet
 
-
-def run_full_pipeline(filepath, sep=",", encoding="utf-8"):
-   
+def run_full_pipeline(filepath=DATA_PATH, sep=",", encoding="utf-8"):
     df, df_PS, df_PD = load_and_split(filepath, sep=sep, encoding=encoding)
 
     df_SD, df_SD_PS, df_SD_PD = extract_socio_demo(df, df_PS, df_PD)
     df_SD_PS = clean_impute_socio_demo(df_SD_PS)
 
     df_BAI = process_bai(df_PS)
+    df_BAI_PD = process_bai_pd(df_PD)
     df_TSQ, df_TSQ_PD = process_tsq(df_PS, df_PD)
     df_EP, df_EP_PD = process_ep(df_PS, df_PD)
     df_16, df_16_PD, echelle1, echelle2 = process_16items(df_PS, df_PD)
@@ -274,6 +258,7 @@ def run_full_pipeline(filepath, sep=",", encoding="utf-8"):
         "df_SD_PS": df_SD_PS,
         "df_SD_PD": df_SD_PD,
         "df_BAI": df_BAI,
+        "df_BAI_PD": df_BAI_PD,
         "df_TSQ": df_TSQ,
         "df_TSQ_PD": df_TSQ_PD,
         "df_EP": df_EP,
@@ -289,6 +274,5 @@ def run_full_pipeline(filepath, sep=",", encoding="utf-8"):
 
 
 if __name__ == "__main__":
-    
-    resultats = run_full_pipeline(r"C:\TSQ\data\data1.csv")
+    resultats = run_full_pipeline()
     print(repartition_bai(resultats["df_BAI"]))
